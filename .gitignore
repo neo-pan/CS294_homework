@@ -87,3 +87,14 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# VS Code settings
+.vscode/
+
+# gym ver-0.10.5
+gym-0.10.5/
+
+# personal file
+*.ipynb
+expert_data/
+MUJOCO_LOG.TXT
