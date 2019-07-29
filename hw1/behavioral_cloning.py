@@ -30,7 +30,15 @@ class SimpleCloner:
 
     def cost(self, output, labels):
         loss = tf.losses.mean_squared_error(output, labels)
+
+        # TODO: Implement 0-1 loss function
+        # loss = tf.math.not_equal(output, tf.cast(labels, tf.float64))
+        # loss = tf.reduce_sum(tf.cast(loss, tf.float64))
+
         return loss
+
+    def create_model(self):
+        pass
 
     def train(self, dataset, num_data):
         iters_per_epoch = ceil(num_data / self.args.batch_size)
@@ -44,16 +52,21 @@ class SimpleCloner:
 
         output = self.forward(observations)
         loss = self.cost(output, actions)
-        optimizer = tf.train.AdamOptimizer(learning_rate=self.args.learning_rate).minimize(loss)
+        optimizer_op = tf.train.AdamOptimizer(learning_rate=self.args.learning_rate).minimize(loss)
         
         init = tf.initialize_all_variables()
-        with tf.Session() as sess:
-            sess.run(init)
-            for i in range(self.args.num_epochs):
-                print('----EPOCH----{}----'.format(i))
-                for i in range(iters_per_epoch):
-                    loss_value, _ = sess.run([loss, optimizer])
-                    print("Iter: {}, Loss: {:.4f}".format(i, loss_value))
+        saver = tf.train.Saver()
+        if self.args.first_train:
+            with tf.Session() as sess:
+                sess.run(init)
+                for i in range(self.args.num_epochs):
+                    print('--------EPOCH----{}--------'.format(i))
+                    for i in range(iters_per_epoch):
+                        loss_value, _ = sess.run([loss, optimizer_op])
+                        print("Iter: {}, Loss: {:.4f}".format(i, loss_value))
+                saver.save(sess, '/tmp/model.ckpt')
+
+        return observations, output
 
 
 def main():
@@ -62,7 +75,10 @@ def main():
     parser.add_argument('expert_data_file', type=str)
     parser.add_argument('envname', type=str)
     parser.add_argument('--render', action='store_true')
+    parser.add_argument('--first_train', action='store_true')
     parser.add_argument("--max_timesteps", type=int)
+    parser.add_argument('--num_rollouts', type=int, default=20,
+                        help='Number of expert roll outs')
     parser.add_argument('--num_epochs', type=int, default=20,
                         help='Number of training epochs')
     parser.add_argument('--hidden_layer_size', type=int, default=100,
@@ -95,11 +111,43 @@ def main():
     dataset = tf.data.Dataset.from_tensor_slices((observations, actions))
 
     model = SimpleCloner(args, input_size, output_size)
-    model.train(dataset, num_data)
+    input, output = model.train(dataset, num_data)
 
-    # import gym
-    # env = gym.make(args.envname)
-    # max_steps = args.max_timesteps or env.spec.timestep_limit
+    import gym
+    env = gym.make(args.envname)
+    max_steps = args.max_timesteps or env.spec.timestep_limit
+
+    returns = []
+    observations = []
+    actions = []
+
+    saver = tf.train.Saver()
+    sess = tf.Session()
+    saver.restore(sess, '/tmp/model.ckpt')
+
+    for i in range(args.num_rollouts):
+        print('iter', i)
+        obs = env.reset()
+        done = False
+        totalr = 0.
+        steps = 0
+        while not done:
+            action = sess.run(output, feed_dict={input:obs[None,:]})
+            observations.append(obs)
+            actions.append(action)
+            obs, r, done, _ = env.step(action)
+            totalr += r
+            steps += 1
+            if args.render:
+                env.render()
+            if steps % 100 == 0: print("%i/%i"%(steps, max_steps))
+            if steps >= max_steps:
+                break
+        returns.append(totalr)
+
+    print('returns', returns)
+    print('mean return', np.mean(returns))
+    print('std of return', np.std(returns))
 
 if __name__ == "__main__":
     main()
