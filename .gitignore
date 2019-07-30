@@ -98,3 +98,4 @@ gym-0.10.5/
 *.ipynb
 expert_data/
 MUJOCO_LOG.TXT
+tmp/

@@ -1,5 +1,11 @@
 #!/usr/bin/env python
 
+"""
+Example usage:
+    python behavioral_cloning.py expert_data/Humanoid-v2.pkl Humanoid-v2 --render \
+            --num_rollouts 20
+"""
+
 import os
 import pickle
 import tensorflow as tf
@@ -15,21 +21,25 @@ class SimpleCloner:
         self.input_size = input_size
         self.output_size = output_size
     
-    def forward(self, input):
-        with tf.variable_scope("Input"):
-            output = tf.layers.dense(inputs=input, units=self.args.hidden_layer_size, 
+    def forward(self, inputs):
+        with tf.variable_scope("Input", reuse=tf.AUTO_REUSE):
+            outputs = tf.layers.dense(inputs=inputs, units=self.args.hidden_layer_size, 
+                                    kernel_initializer=tf.initializers.variance_scaling(
+                                    scale=2., mode="fan_in", distribution="truncated_normal", seed=None), 
                                     activation=tf.nn.relu)
-        with tf.variable_scope("Hidden"):
+        with tf.variable_scope("Hidden", reuse=tf.AUTO_REUSE):
             for _ in range(self.args.hidden_layer_depth):
-                output = tf.layers.dense(inputs=output, units=self.args.hidden_layer_size, 
+                outputs = tf.layers.dense(inputs=outputs, units=self.args.hidden_layer_size, 
+                                        kernel_initializer=tf.initializers.variance_scaling(
+                                        scale=2., mode="fan_in", distribution="truncated_normal", seed=None), 
                                         activation=tf.nn.relu)
-        with tf.variable_scope("Output"):
-            output = tf.layers.dense(inputs=output, units=self.output_size, 
+        with tf.variable_scope("Output", reuse=tf.AUTO_REUSE):
+            outputs = tf.layers.dense(inputs=outputs, units=self.output_size, 
                                         activation=None)
-        return output
+        return inputs, outputs
 
-    def cost(self, output, labels):
-        loss = tf.losses.mean_squared_error(output, labels)
+    def cost(self, outputs, labels):
+        loss = tf.losses.mean_squared_error(outputs, labels)
 
         # TODO: Implement 0-1 loss function
         # loss = tf.math.not_equal(output, tf.cast(labels, tf.float64))
@@ -38,81 +48,45 @@ class SimpleCloner:
         return loss
 
     def create_model(self):
-        pass
+        inputs = tf.placeholder(dtype=tf.float64, shape=[None, self.input_size], name='inputs')
+        return self.forward(inputs)
 
-    def train(self, dataset, num_data):
-        iters_per_epoch = ceil(num_data / self.args.batch_size)
-
+    def train(self, dataset):
         dataset = dataset.shuffle(buffer_size=10000)
         dataset = dataset.batch(self.args.batch_size)
-        dataset = dataset.repeat(self.args.num_epochs)
 
-        iterator = dataset.make_one_shot_iterator()
-        observations, actions  = iterator.get_next()
+        iterator = dataset.make_initializable_iterator()
+        observation, action  = iterator.get_next()
 
-        output = self.forward(observations)
-        loss = self.cost(output, actions)
-        optimizer_op = tf.train.AdamOptimizer(learning_rate=self.args.learning_rate).minimize(loss)
+        _, outputs = self.forward(observation)
+
+        loss = self.cost(outputs, action)
         
-        init = tf.initialize_all_variables()
-        saver = tf.train.Saver()
-        if self.args.first_train:
-            with tf.Session() as sess:
-                sess.run(init)
-                for i in range(self.args.num_epochs):
-                    print('--------EPOCH----{}--------'.format(i))
-                    for i in range(iters_per_epoch):
+        optimizer_op = tf.train.AdamOptimizer(learning_rate=self.args.learning_rate).minimize(loss)
+        init = tf.global_variables_initializer()
+
+        vl = [v for v in tf.global_variables() if "Adam" not in v.name]
+        saver = tf.train.Saver(var_list=vl)
+
+        with tf.Session() as sess:
+            sess.run(init)
+            if self.args.first_train:
+                self.args.first_train = False
+            else:
+                saver.restore(sess, './tmp/{}.ckpt'.format(self.args.model_name))
+            for i_e in range(self.args.num_epochs):
+                i_i = 0
+                sess.run(iterator.initializer)
+                while True:
+                    try:
                         loss_value, _ = sess.run([loss, optimizer_op])
-                        print("Iter: {}, Loss: {:.4f}".format(i, loss_value))
-                saver.save(sess, '/tmp/model.ckpt')
+                        i_i += 1
+                    except tf.errors.OutOfRangeError:
+                        print("Epoch: {}, Iter: {}, Loss: {:.4f}".format(i_e, i_i, loss_value))
+                        break
+            saver.save(sess, './tmp/{}.ckpt'.format(self.args.model_name))
 
-        return observations, output
-
-
-def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('expert_data_file', type=str)
-    parser.add_argument('envname', type=str)
-    parser.add_argument('--render', action='store_true')
-    parser.add_argument('--first_train', action='store_true')
-    parser.add_argument("--max_timesteps", type=int)
-    parser.add_argument('--num_rollouts', type=int, default=20,
-                        help='Number of expert roll outs')
-    parser.add_argument('--num_epochs', type=int, default=20,
-                        help='Number of training epochs')
-    parser.add_argument('--hidden_layer_size', type=int, default=100,
-                        help='Size of hidden layers')
-    parser.add_argument('--hidden_layer_depth', type=int, default=2,
-                        help='Depth of hidden layers')
-    parser.add_argument('--learning_rate', type=int, default=0.001,
-                        help='Learning rate')
-    parser.add_argument('--batch_size', type=int, default=128,
-                        help='Size of mini-batch')
-
-    args = parser.parse_args()
-
-    print('loading expert data')
-    with open(args.expert_data_file, 'rb') as f:
-            expert_data = pickle.loads(f.read())
-    print('expert data loaded:')
-
-    for key,data in expert_data.items():
-        if key=='observations':
-            observations = data
-            input_size = data.shape[-1]
-            num_data = data.shape[0]
-        if key=='actions':
-            data = data.squeeze()
-            actions = data
-            output_size = data.shape[-1]
-        print(key+':'+str(data.shape))
-    
-    dataset = tf.data.Dataset.from_tensor_slices((observations, actions))
-
-    model = SimpleCloner(args, input_size, output_size)
-    input, output = model.train(dataset, num_data)
-
+def evaluate_model(args, model):
     import gym
     env = gym.make(args.envname)
     max_steps = args.max_timesteps or env.spec.timestep_limit
@@ -121,9 +95,10 @@ def main():
     observations = []
     actions = []
 
+    inputs, outputs = model.create_model()
     saver = tf.train.Saver()
     sess = tf.Session()
-    saver.restore(sess, '/tmp/model.ckpt')
+    saver.restore(sess, '/tmp/{}.ckpt'.format(args.model_name))
 
     for i in range(args.num_rollouts):
         print('iter', i)
@@ -132,7 +107,7 @@ def main():
         totalr = 0.
         steps = 0
         while not done:
-            action = sess.run(output, feed_dict={input:obs[None,:]})
+            action = sess.run(outputs, feed_dict={inputs:obs[None,:]})
             observations.append(obs)
             actions.append(action)
             obs, r, done, _ = env.step(action)
@@ -148,6 +123,55 @@ def main():
     print('returns', returns)
     print('mean return', np.mean(returns))
     print('std of return', np.std(returns))
+    sess.close()
+    return observations
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('expert_data_file', type=str)
+    parser.add_argument('envname', type=str)
+    parser.add_argument('--render', action='store_true')
+    parser.add_argument('--first_train', action='store_true')
+    parser.add_argument("--max_timesteps", type=int)
+    parser.add_argument('--num_rollouts', type=int, default=20,
+                        help='Number of expert roll outs')
+    parser.add_argument('--num_epochs', type=int, default=20,
+                        help='Number of training epochs')
+    parser.add_argument('--hidden_layer_size', type=int, default=512,
+                        help='Size of hidden layers')
+    parser.add_argument('--hidden_layer_depth', type=int, default=2,
+                        help='Depth of hidden layers')
+    parser.add_argument('--learning_rate', type=int, default=0.001,
+                        help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=128,
+                        help='Size of mini-batch')
+    parser.add_argument('--model_name', type=str, default='BehavioralCloning',
+                        help='Name of this model')
+
+    args = parser.parse_args()
+
+    print('loading expert data')
+    with open(args.expert_data_file, 'rb') as f:
+            expert_data = pickle.loads(f.read())
+    print('expert data loaded:')
+
+    for key,data in expert_data.items():
+        if key=='observations':
+            observations = data
+            input_size = data.shape[-1]
+        if key=='actions':
+            data = data.squeeze()
+            actions = data
+            output_size = data.shape[-1]
+        print(key+':'+str(data.shape))
+    
+    dataset = tf.data.Dataset.from_tensor_slices((observations, actions))
+
+    model = SimpleCloner(args, input_size, output_size)
+    model.train(dataset)
+
+    _ = evaluate_model(args, model)
 
 if __name__ == "__main__":
     main()
