@@ -2,8 +2,7 @@
 
 """
 Example usage:
-    python dagger.py experts/Humanoid-v2.pkl expert_data/Humanoid-v2.pkl Humanoid-v2 --first_train \
-            --num_rollouts 20
+    python dagger.py experts/Humanoid-v2.pkl expert_data/Humanoid-v2.pkl Humanoid-v2 --first_train
 """
 
 import os
@@ -16,6 +15,7 @@ import load_policy
 from behavioral_cloning import SimpleCloner, evaluate_model
 
 def labeling(args, observations, policy_fn):
+    print("Begin Labeling")
     with tf.Session():
         tf_util.initialize()
         actions = []
@@ -24,7 +24,8 @@ def labeling(args, observations, policy_fn):
             actions.append(action)
 
     assert len(observations) == len(actions)
-    new_dataset = tf.data.Dataset.from_tensor_slices((np.array(observations), np.array(actions)))
+    new_dataset = tf.data.Dataset.from_tensor_slices((np.array(observations), np.array(actions).squeeze()))
+    print('End Labeling')
     return new_dataset
 
 def main():
@@ -36,7 +37,7 @@ def main():
     parser.add_argument('--render', action='store_true')
     parser.add_argument('--first_train', action='store_true')
     parser.add_argument("--max_timesteps", type=int)
-    parser.add_argument('--num_rollouts', type=int, default=10,
+    parser.add_argument('--num_rollouts', type=int, default=20,
                         help='Number of expert roll outs')
     parser.add_argument('--num_epochs', type=int, default=1,
                         help='Number of training epochs')
@@ -75,16 +76,33 @@ def main():
         print(key+':'+str(data.shape))
     
     dataset = tf.data.Dataset.from_tensor_slices((observations, actions))
-    
+    model = SimpleCloner(args, input_size, output_size)
+
     for i in range(args.dagger_epochs):
         print('--------No {}: DAgger Epoch--------'.format(i))
-        model = SimpleCloner(args, input_size, output_size)
         model.train(dataset)
         observations = evaluate_model(args, model)
+        print('Number of new data: {}'.format(len(observations)))
         new_dataset = labeling(args, observations, policy_fn)
-        dataset.concatenate(new_dataset)
+        dataset = dataset.concatenate(new_dataset)
         print('--------No {}: DAgger Epoch--------'.format(i))
 
+def dataset_test(dataset):
+    with tf.Session() as sess:
+        dataset = dataset.shuffle(buffer_size=10000)
+        # dataset = dataset.batch(128)
+        iterator = dataset.make_one_shot_iterator()
+        observation, action = iterator.get_next()
+        batch = 0
+        while True:
+            try:
+                sess.run([observation, action])
+                batch += 1
+            except tf.errors.OutOfRangeError:
+                print("Number of data in dataset: {}".format(batch))
+                break
 
 if __name__ == "__main__":
+    import os
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     main()

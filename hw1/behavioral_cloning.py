@@ -2,8 +2,7 @@
 
 """
 Example usage:
-    python behavioral_cloning.py expert_data/Humanoid-v2.pkl Humanoid-v2 --render \
-            --num_rollouts 20
+    python behavioral_cloning.py expert_data/Humanoid-v2.pkl Humanoid-v2 --first_train
 """
 
 import os
@@ -20,6 +19,7 @@ class SimpleCloner:
         self.args = args
         self.input_size = input_size
         self.output_size = output_size
+        self.create_model()
     
     def forward(self, inputs):
         with tf.variable_scope("Input", reuse=tf.AUTO_REUSE):
@@ -36,7 +36,7 @@ class SimpleCloner:
         with tf.variable_scope("Output", reuse=tf.AUTO_REUSE):
             outputs = tf.layers.dense(inputs=outputs, units=self.output_size, 
                                         activation=None)
-        return inputs, outputs
+        return outputs
 
     def cost(self, outputs, labels):
         loss = tf.losses.mean_squared_error(outputs, labels)
@@ -48,43 +48,50 @@ class SimpleCloner:
         return loss
 
     def create_model(self):
-        inputs = tf.placeholder(dtype=tf.float64, shape=[None, self.input_size], name='inputs')
-        return self.forward(inputs)
+        self.inputs_ph = tf.placeholder(dtype=tf.float64, shape=[None, self.input_size], name='inputs')
+        self.labels_ph = tf.placeholder(dtype=tf.float64, shape=[None, self.output_size], name='labels')
+        self.outputs_ph = self.forward(self.inputs_ph)
+        self.loss_ph = self.cost(self.outputs_ph, self.labels_ph)
+        self.optimizer = tf.train.AdamOptimizer(learning_rate=self.args.learning_rate)
+
+    def get_model(self):
+        return self.inputs_ph, self.outputs_ph
 
     def train(self, dataset):
         dataset = dataset.shuffle(buffer_size=10000)
         dataset = dataset.batch(self.args.batch_size)
 
         iterator = dataset.make_initializable_iterator()
-        observation, action  = iterator.get_next()
+        observation, action = iterator.get_next()
 
-        _, outputs = self.forward(observation)
+        optimizer_op = self.optimizer.minimize(self.loss_ph)
 
-        loss = self.cost(outputs, action)
-        
-        optimizer_op = tf.train.AdamOptimizer(learning_rate=self.args.learning_rate).minimize(loss)
         init = tf.global_variables_initializer()
-
-        vl = [v for v in tf.global_variables() if "Adam" not in v.name]
-        saver = tf.train.Saver(var_list=vl)
+        # vl = [v for v in tf.global_variables() if "Adam" not in v.name] 
+        # saver = tf.train.Saver(var_list=vl)
+        saver = tf.train.Saver()
 
         with tf.Session() as sess:
-            sess.run(init)
             if self.args.first_train:
+                sess.run(init)
                 self.args.first_train = False
             else:
-                saver.restore(sess, './tmp/{}.ckpt'.format(self.args.model_name))
+                sess.run(init)
+                saver.restore(sess, './tmp/{}'.format(self.args.model_name))
+                
             for i_e in range(self.args.num_epochs):
                 i_i = 0
                 sess.run(iterator.initializer)
                 while True:
                     try:
-                        loss_value, _ = sess.run([loss, optimizer_op])
+                        o, a = sess.run([observation, action])
+                        loss_value, _ = sess.run([self.loss_ph, optimizer_op], 
+                                                feed_dict={self.inputs_ph:o, self.labels_ph:a})
                         i_i += 1
                     except tf.errors.OutOfRangeError:
                         print("Epoch: {}, Iter: {}, Loss: {:.4f}".format(i_e, i_i, loss_value))
                         break
-            saver.save(sess, './tmp/{}.ckpt'.format(self.args.model_name))
+            saver.save(sess, './tmp/{}'.format(self.args.model_name))
 
 def evaluate_model(args, model):
     import gym
@@ -95,11 +102,10 @@ def evaluate_model(args, model):
     observations = []
     actions = []
 
-    inputs, outputs = model.create_model()
+    inputs, outputs = model.get_model()
     saver = tf.train.Saver()
     sess = tf.Session()
-    saver.restore(sess, '/tmp/{}.ckpt'.format(args.model_name))
-
+    saver.restore(sess, './tmp/{}'.format(args.model_name))
     for i in range(args.num_rollouts):
         print('iter', i)
         obs = env.reset()
@@ -174,4 +180,6 @@ def main():
     _ = evaluate_model(args, model)
 
 if __name__ == "__main__":
+    import os
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     main()
